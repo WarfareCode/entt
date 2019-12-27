@@ -1299,8 +1299,8 @@ public:
         using handler_type = group_handler<exclude_t<Exclude...>, get_t<std::decay_t<Get>...>, std::decay_t<Owned>...>;
 
         [[maybe_unused]] constexpr auto size = sizeof...(Owned) + sizeof...(Get) + sizeof...(Exclude);
+        const auto cpools = std::forward_as_tuple(assure<std::decay_t<Owned>>()..., assure<std::decay_t<Get>>()...);
         const std::size_t extent[3]{sizeof...(Owned), sizeof...(Get), sizeof...(Exclude)};
-        const auto cpools = std::forward_as_tuple(assure<std::decay_t<Owned>>()...);
         handler_type *handler = nullptr;
 
         if(auto it = std::find_if(groups.cbegin(), groups.cend(), [&extent](const auto &curr) {
@@ -1355,28 +1355,32 @@ public:
             (on_destroy<std::decay_t<Get>>().before(discard_if).template connect<&handler_type::discard_if>(*handler), ...);
             (on_construct<Exclude>().before(discard_if).template connect<&handler_type::discard_if>(*handler), ...);
 
-            auto init = view<Owned..., Get...>(entt::exclude<Exclude...>);
-
-            // we cannot iterate backwards because we want to leave behind valid entities in case of owned types
             if constexpr(sizeof...(Owned) == 0) {
-                std::for_each(std::make_reverse_iterator(init.end()), std::make_reverse_iterator(init.begin()), [handler](const auto entity) {
+                for(const auto entity: view<Owned..., Get...>(entt::exclude<Exclude...>)) {
                     handler->current.construct(entity);
-                });
+                }
             } else {
-                std::for_each(std::make_reverse_iterator(init.end()), std::make_reverse_iterator(init.begin()), [handler, cpools](const auto entity) {
-                    if(!(std::get<0>(cpools).index(entity) < handler->current)) {
+                const auto &cpool = std::min({
+                    static_cast<sparse_set<Entity> &>(std::get<pool_type<Owned> &>(cpools))...,
+                    static_cast<sparse_set<Entity> &>(std::get<pool_type<Get> &>(cpools))...
+                }, [](const auto &lhs, const auto &rhs) {
+                    return lhs.size() < rhs.size();
+                });
+
+                // we cannot iterate backwards because we want to leave behind valid entities in case of owned types
+                std::for_each(std::make_reverse_iterator(cpool.end()), std::make_reverse_iterator(cpool.begin()), [cpools, handler, curr = view<Owned..., Get...>(entt::exclude<Exclude...>)](const auto entity) {
+                    if(curr.contains(entity) && !(std::get<0>(cpools).index(entity) < handler->current)) {
                         const auto pos = handler->current++;
                         (std::get<pool_type<Owned> &>(cpools).swap(std::get<pool_type<Owned> &>(cpools).data()[pos], entity), ...);
                     }
                 });
-
             }
         }
 
         if constexpr(sizeof...(Owned) == 0) {
-            return { handler->current, assure<std::decay_t<Get>>()... };
+            return { handler->current, std::get<pool_type<Get> &>(cpools)... };
         } else {
-            return { std::get<0>(cpools).super, handler->current, std::get<pool_type<Owned> &>(cpools)... , assure<std::decay_t<Get>>()... };
+            return { std::get<0>(cpools).super, handler->current, std::get<pool_type<Owned> &>(cpools)... , std::get<pool_type<Get> &>(cpools)... };
         }
     }
 
